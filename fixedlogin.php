@@ -1,23 +1,38 @@
 <?php
 session_start();
 
-$conn = mysqli_connect("localhost", "root", "", "practice_db");
+ini_set('session.cookie_httponly', 1);
+ini_set('session.use_only_cookies', 1);
 
-if (!$conn) {
-    die("Connection failed");
+$conn = new mysqli("localhost", "app_user", "StrongPass@123", "practice_db");
+
+if ($conn->connect_error) {
+    die("Connection failed!");
 }
 
-$message = "";
-$showLoginPopup = false;
+if (empty($_SESSION['token'])) {
+    $_SESSION['token'] = bin2hex(random_bytes(32));
+}
+
+if (!isset($_SESSION['attempts'])) {
+    $_SESSION['attempts'] = 0;
+}
 
 function clean_input($data) {
     return htmlspecialchars(trim($data));
 }
 
+$message = "";
+$showLoginPopup = false;
+
 if (isset($_POST['register'])) {
 
+    if (!hash_equals($_SESSION['token'], $_POST['token'])) {
+        die("Invalid request!");
+    }
+
     $username = clean_input($_POST["username"]);
-    $password = trim($_POST["password"]);
+    $password = $_POST["password"];
 
     if (empty($username) || empty($password)) {
         $message = "All fields are required!";
@@ -25,57 +40,77 @@ if (isset($_POST['register'])) {
         $message = "Password must be at least 6 characters!";
     } else {
 
-        $stmt = mysqli_prepare($conn, "SELECT id FROM users WHERE username=?");
-        mysqli_stmt_bind_param($stmt, "s", $username);
-        mysqli_stmt_execute($stmt);
-        mysqli_stmt_store_result($stmt);
+        // Check duplicate username
+        $stmt = $conn->prepare("SELECT id FROM users WHERE username=?");
+        $stmt->bind_param("s", $username);
+        $stmt->execute();
+        $stmt->store_result();
 
-        if (mysqli_stmt_num_rows($stmt) > 0) {
+        if ($stmt->num_rows > 0) {
             $message = "Username already exists!";
         } else {
 
             $hashed_password = password_hash($password, PASSWORD_DEFAULT);
 
-            
-            $stmt = mysqli_prepare($conn, "INSERT INTO users (username, password) VALUES (?, ?)");
-            mysqli_stmt_bind_param($stmt, "ss", $username, $hashed_password);
+            $stmt = $conn->prepare("INSERT INTO users (username, password) VALUES (?, ?)");
+            $stmt->bind_param("ss", $username, $hashed_password);
 
-            if (mysqli_stmt_execute($stmt)) {
+            if ($stmt->execute()) {
                 $message = "Registration Successful!";
                 $showLoginPopup = true;
             } else {
                 $message = "Something went wrong!";
             }
         }
+        $stmt->close();
     }
 }
 
 if (isset($_POST['login'])) {
 
-    $username = clean_input($_POST["username"]);
-    $password = trim($_POST["password"]);
+    if (!hash_equals($_SESSION['token'], $_POST['token'])) {
+        die("Invalid request!");
+    }
 
-    $stmt = mysqli_prepare($conn, "SELECT password FROM users WHERE username=?");
-    mysqli_stmt_bind_param($stmt, "s", $username);
-    mysqli_stmt_execute($stmt);
-    mysqli_stmt_store_result($stmt);
+    // Brute force protection
+    if ($_SESSION['attempts'] >= 5) {
+        $message = "Too many attempts. Try later.";
+        $showLoginPopup = true;
+    } else {
 
-    if (mysqli_stmt_num_rows($stmt) == 1) {
+        $username = clean_input($_POST["username"]);
+        $password = $_POST["password"];
 
-        mysqli_stmt_bind_result($stmt, $stored_hash);
-        mysqli_stmt_fetch($stmt);
+        $stmt = $conn->prepare("SELECT password FROM users WHERE username=?");
+        $stmt->bind_param("s", $username);
+        $stmt->execute();
+        $stmt->store_result();
 
-        if (password_verify($password, $stored_hash)) {
-            $_SESSION['username'] = $username;
-            $message = "Login Successful!";
+        if ($stmt->num_rows == 1) {
+
+            $stmt->bind_result($stored_hash);
+            $stmt->fetch();
+
+            if (password_verify($password, $stored_hash)) {
+
+                session_regenerate_id(true);
+                $_SESSION['username'] = $username;
+                $_SESSION['attempts'] = 0;
+
+                $message = "Login Successful!";
+            } else {
+                $_SESSION['attempts']++;
+                $message = "Invalid credentials!";
+                $showLoginPopup = true;
+            }
+
         } else {
-            $message = "Wrong Password!";
+            $_SESSION['attempts']++;
+            $message = "Invalid credentials!";
             $showLoginPopup = true;
         }
 
-    } else {
-        $message = "User not found!";
-        $showLoginPopup = true;
+        $stmt->close();
     }
 }
 ?>
@@ -88,7 +123,8 @@ if (isset($_POST['login'])) {
 <style>
 body { font-family: Arial; }
 
-* modal */.modal {
+/* modal */
+.modal {
     display: none;
     position: fixed;
     top: 0; left: 0;
@@ -113,22 +149,26 @@ body { font-family: Arial; }
 <h2>Register</h2>
 
 <form method="post">
+<input type="hidden" name="token" value="<?php echo $_SESSION['token']; ?>">
+
 Username:<br>
 <input type="text" name="username" maxlength="50" required><br><br>
 
 Password:<br>
-<input type="password" name="password" required><br><br>
+<input type="password" name="password" minlength="6" required><br><br>
 
 <button type="submit" name="register">Register</button>
 </form>
 
-<p><?php echo $message; ?></p>
+<p><?php echo htmlspecialchars($message); ?></p>
 
 <div id="loginModal" class="modal">
   <div class="modal-content">
     <h2>Login</h2>
 
     <form method="post">
+        <input type="hidden" name="token" value="<?php echo $_SESSION['token']; ?>">
+
         Username:<br>
         <input type="text" name="username" required><br><br>
 
@@ -147,7 +187,6 @@ Password:<br>
 function openModal() {
     document.getElementById("loginModal").style.display = "block";
 }
-
 function closeModal() {
     document.getElementById("loginModal").style.display = "none";
 }
